@@ -1,0 +1,163 @@
+services:
+  backend:
+    image: frappe/erpnext:v15.19.1
+    restart: unless-stopped
+    networks:
+      - internal
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  configurator:
+    image: frappe/erpnext:v15.19.1
+    entrypoint: [ "bash", "-c" ]
+    command: >
+      ls -1 apps > sites/apps.txt;
+      bench set-config -g db_host ${DB_HOST};
+      bench set-config -gp db_port ${DB_PORT};
+      bench set-config -g redis_cache "redis://${REDIS_CACHE_HOST}:${REDIS_PORT}";
+      bench set-config -g redis_queue "redis://${REDIS_QUEUE_HOST}:${REDIS_PORT}";
+      bench set-config -g redis_socketio "redis://${REDIS_QUEUE_HOST}:${REDIS_PORT}";
+      bench set-config -gp socketio_port ${SOCKETIO_PORT};
+    networks:
+      - internal
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  create-site:
+    image: frappe/erpnext:v15.19.1
+    entrypoint: [ "bash", "-c" ]
+    command: >
+      wait-for-it -t 120 db:3306;
+      wait-for-it -t 120 redis-cache:6379;
+      wait-for-it -t 120 redis-queue:6379;
+      bench new-site
+      --no-mariadb-socket
+      --admin-password=${ADMIN_PASSWORD}
+      --db-root-password=${DB_ROOT_PASSWORD}
+      --install-app erpnext
+      --set-default ${SITE_NAME};
+    networks:
+      - internal
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  db:
+    image: mariadb:10.6
+    restart: unless-stopped
+    networks:
+      - internal
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    healthcheck:
+      test: mysqladmin ping -h localhost --password=${MYSQL_ROOT_PASSWORD}
+      interval: 1s
+      retries: 15
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - db-data:/var/lib/mysql
+
+  frontend:
+    image: frappe/erpnext:v15.19.1
+    restart: unless-stopped
+    command: nginx-entrypoint.sh
+    depends_on:
+      - backend
+      - websocket
+    networks:
+      - proxy
+      - internal
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: ${SITE_NAME}
+      SOCKETIO: websocket:${SOCKETIO_PORT}
+      CLIENT_MAX_BODY_SIZE: 50m
+    ports:
+      - "8085:8080" # optional (boleh dihapus jika full via proxy)
+#    labels:
+#    - traefik.enable=true
+#    # HTTP Router
+#    - traefik.http.routers.erp.rule=Host(`erp.int.netcc.my.id`)
+#    - traefik.http.routers.erp.entrypoints=web
+#    - traefik.http.services.erp.loadbalancer.server.port=8080
+
+    # Optional redirect HTTPS (kalau nanti aktif)
+    # - traefik.http.middlewares.redirect-https.redirectscheme.scheme=https
+    # - traefik.http.routers.erp.middlewares=redirect-https
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  websocket:
+    image: frappe/erpnext:v15.19.1
+    restart: unless-stopped
+    command: node /home/frappe/frappe-bench/apps/frappe/socketio.js
+    networks:
+      - internal
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  queue-long:
+    image: frappe/erpnext:v15.19.1
+    restart: unless-stopped
+    command: bench worker --queue long,default,short
+    networks:
+      - internal
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  queue-short:
+    image: frappe/erpnext:v15.19.1
+    restart: unless-stopped
+    command: bench worker --queue short,default
+    networks:
+      - internal
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  scheduler:
+    image: frappe/erpnext:v15.19.1
+    restart: unless-stopped
+    command: bench schedule
+    networks:
+      - internal
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  redis-cache:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    networks:
+      - internal
+    volumes:
+      - redis-cache-data:/data
+
+  redis-queue:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    networks:
+      - internal
+    volumes:
+      - redis-queue-data:/data
+
+networks:
+  proxy:
+    external: true
+  internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  db-data:
+  redis-cache-data:
+  redis-queue-data:
+  sites:
+  logs:
